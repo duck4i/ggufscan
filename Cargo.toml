@@ -2,6 +2,12 @@
 name = "ggufscan"
 version = "0.1.0"
 edition = "2021"
+description = "Easily find and delete GGUF model files from your HDD."
+authors = ["duck4i"]
+license = "MIT"
+repository = "https://github.com/duck4i/ggufscan"
+keywords = ["gguf", "scan", "hdd", "cleanup", "utilities"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0.95"

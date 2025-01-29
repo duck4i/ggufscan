@@ -6,6 +6,10 @@ A simple TUI tool for finding and removing the .gguf files to save the disk stor
 
 ![img](example.png)
 
+## Install
+
+`cargo install ggufscan`
+
 ## Magic bytes, Ollama and other tools
 
 ```
