@@ -4,10 +4,12 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use ignore::WalkBuilder;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
+
 use std::{
     fs,
     io::{self, stdout},
@@ -16,7 +18,6 @@ use std::{
     thread,
     time::Duration,
 };
-use walkdir::WalkDir;
 
 #[derive(Debug)]
 struct FileInfo {
@@ -47,6 +48,7 @@ impl App {
         }
     }
 
+    // ... (rest of App impl remains the same)
     fn toggle_selected(&mut self) {
         if let Some(i) = self.list_state.selected() {
             self.selected[i] = !self.selected[i];
@@ -145,47 +147,64 @@ fn format_size(size: u64) -> String {
 }
 
 fn scan_directory(tx: Sender<ScanMessage>) {
-    let walker = WalkDir::new("/")
-        .follow_links(true)
-        .same_file_system(true)
-        .into_iter();
+    // Create a channel for parallel workers to send their findings
+    let (worker_tx, worker_rx) = mpsc::channel();
+    let tx_clone = tx.clone();
 
-    for entry in walker {
-        match entry {
-            Ok(entry) => {
-                let path = entry.path();
+    // Spawn a thread to handle worker messages
+    thread::spawn(move || {
+        for message in worker_rx {
+            tx_clone.send(message).ok();
+        }
+    });
 
-                // Send directory updates for folders
-                if path.is_dir() {
-                    if let Some(path_str) = path.to_str() {
-                        tx.send(ScanMessage::Directory(path_str.to_string())).ok();
-                    }
+    // Configure the parallel walker
+    let walker = WalkBuilder::new("/")
+        .hidden(false) // Include hidden files
+        .ignore(false) // Don't use .gitignore rules
+        .git_ignore(false) // Don't use .git ignore rules
+        .threads(num_cpus::get()) // Use all available CPU cores
+        .build_parallel();
+
+    walker.run(|| {
+        let worker_tx = worker_tx.clone();
+        Box::new(move |entry| {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => return ignore::WalkState::Continue,
+            };
+
+            let path = entry.path();
+
+            // Send directory updates
+            if path.is_dir() {
+                if let Some(path_str) = path.to_str() {
+                    worker_tx
+                        .send(ScanMessage::Directory(path_str.to_string()))
+                        .ok();
                 }
+            }
 
-                // Send file updates for .gguf files
-                if path.is_file() && path.extension().map_or(false, |ext| ext == "gguf") {
-                    if let Ok(metadata) = fs::metadata(path) {
-                        tx.send(ScanMessage::File(FileInfo {
+            // Check for .gguf files
+            if path.is_file() && path.extension().map_or(false, |ext| ext == "gguf") {
+                if let Ok(metadata) = fs::metadata(path) {
+                    worker_tx
+                        .send(ScanMessage::File(FileInfo {
                             path: path.to_owned(),
                             size: metadata.len(),
                         }))
                         .ok();
-                    }
                 }
             }
-            Err(err) => {
-                tx.send(ScanMessage::Error(err.to_string())).ok();
-                continue;
-            }
-        }
 
-        // Small sleep to prevent overwhelming the UI
-        thread::sleep(Duration::from_millis(1));
-    }
+            ignore::WalkState::Continue
+        })
+    });
 
     tx.send(ScanMessage::Done).ok();
 }
 
+// ... (UI code remains the same)
 fn ui(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -198,8 +217,8 @@ fn ui(frame: &mut Frame, app: &mut App) {
 
     let title = if app.scanning {
         format!(
-            "Directories: {} | Files found: {} | Scanning... {}",
-            app.dirs_scanned, app.files_found, app.current_path
+            "Scanning: {} | Directories: {} | Files found: {}",
+            app.current_path, app.dirs_scanned, app.files_found
         )
     } else {
         format!("Scan complete | Found {} .gguf files", app.files.len())
