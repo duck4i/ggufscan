@@ -1,6 +1,6 @@
 [package]
 name = "ggufscan"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Easily find and delete GGUF model files from your HDD."
 authors = ["duck4i"]
