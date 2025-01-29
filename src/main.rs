@@ -18,8 +18,14 @@ use std::{
 };
 use walkdir::WalkDir;
 
+#[derive(Debug)]
+struct FileInfo {
+    path: PathBuf,
+    size: u64,
+}
+
 struct App {
-    files: Vec<PathBuf>,
+    files: Vec<FileInfo>,
     selected: Vec<bool>,
     list_state: ListState,
     scanning: bool,
@@ -91,7 +97,7 @@ impl App {
         let mut i = 0;
         while i < self.files.len() {
             if self.selected[i] {
-                fs::remove_file(&self.files[i])?;
+                fs::remove_file(&self.files[i].path)?;
                 self.files.remove(i);
                 self.selected.remove(i);
             } else {
@@ -106,14 +112,36 @@ impl App {
         }
         Ok(())
     }
+
+    fn get_selected_size(&self) -> u64 {
+        self.files
+            .iter()
+            .zip(self.selected.iter())
+            .filter(|(_, &selected)| selected)
+            .map(|(file, _)| file.size)
+            .sum()
+    }
 }
 
 #[derive(Debug)]
 enum ScanMessage {
-    File(PathBuf),
+    File(FileInfo),
     Directory(String),
     Done,
     Error(String),
+}
+
+fn format_size(size: u64) -> String {
+    const GB: u64 = 1024 * 1024 * 1024;
+    const MB: u64 = 1024 * 1024;
+
+    if size >= GB {
+        format!("{:.2} GB", size as f64 / GB as f64)
+    } else if size >= MB {
+        format!("{:.2} MB", size as f64 / MB as f64)
+    } else {
+        format!("{} B", size)
+    }
 }
 
 fn scan_directory(tx: Sender<ScanMessage>) {
@@ -136,7 +164,13 @@ fn scan_directory(tx: Sender<ScanMessage>) {
 
                 // Send file updates for .gguf files
                 if path.is_file() && path.extension().map_or(false, |ext| ext == "gguf") {
-                    tx.send(ScanMessage::File(path.to_owned())).ok();
+                    if let Ok(metadata) = fs::metadata(path) {
+                        tx.send(ScanMessage::File(FileInfo {
+                            path: path.to_owned(),
+                            size: metadata.len(),
+                        }))
+                        .ok();
+                    }
                 }
             }
             Err(err) => {
@@ -160,12 +194,12 @@ fn ui(frame: &mut Frame, app: &mut App) {
             Constraint::Min(1),
             Constraint::Length(3),
         ])
-        .split(frame.size());
+        .split(frame.area());
 
     let title = if app.scanning {
         format!(
-            "Scanning: {} | Directories: {} | Files found: {}",
-            app.current_path, app.dirs_scanned, app.files_found
+            "Directories: {} | Files found: {} | Scanning... {}",
+            app.dirs_scanned, app.files_found, app.current_path
         )
     } else {
         format!("Scan complete | Found {} .gguf files", app.files.len())
@@ -182,9 +216,14 @@ fn ui(frame: &mut Frame, app: &mut App) {
         .files
         .iter()
         .enumerate()
-        .map(|(i, path)| {
+        .map(|(i, file)| {
             let checkbox = if app.selected[i] { "[x] " } else { "[ ] " };
-            ListItem::new(format!("{}{}", checkbox, path.display()))
+            ListItem::new(format!(
+                "{}{:<10} | {}",
+                checkbox,
+                format_size(file.size),
+                file.path.display()
+            ))
         })
         .collect();
 
@@ -194,7 +233,12 @@ fn ui(frame: &mut Frame, app: &mut App) {
 
     frame.render_stateful_widget(list, chunks[1], &mut app.list_state);
 
-    let help_text = "↑/↓: Navigate | Space: Toggle | A: Select All | D: Delete Selected | Q: Quit";
+    let total_selected_size = format_size(app.get_selected_size());
+    let help_text = format!(
+        "↑/↓: Navigate | Space: Toggle | A: Select All | U: Deselect All | D: Delete Selected | Q: Quit | Selected size: {}",
+        total_selected_size
+    );
+
     frame.render_widget(
         Paragraph::new(help_text)
             .block(Block::default().borders(Borders::ALL))
@@ -216,8 +260,8 @@ fn run_app(rx: Receiver<ScanMessage>) -> Result<()> {
         if app.scanning {
             while let Ok(message) = rx.try_recv() {
                 match message {
-                    ScanMessage::File(path) => {
-                        app.files.push(path);
+                    ScanMessage::File(file_info) => {
+                        app.files.push(file_info);
                         app.selected.push(false);
                         app.files_found += 1;
                         if app.files.len() == 1 {
@@ -248,6 +292,7 @@ fn run_app(rx: Receiver<ScanMessage>) -> Result<()> {
                     KeyCode::Down => app.next(),
                     KeyCode::Char(' ') => app.toggle_selected(),
                     KeyCode::Char('a') => app.select_all(),
+                    KeyCode::Char('u') => app.deselect_all(),
                     KeyCode::Char('d') => app.delete_selected()?,
                     _ => {}
                 },
