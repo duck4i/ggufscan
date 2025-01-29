@@ -12,17 +12,31 @@ use ratatui::{
 
 use std::{
     fs,
-    io::{self, stdout},
+    io::{self, stdout, Read},
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::Duration,
 };
 
+const GGUF_MAGIC: &[u8] = b"GGUF";
+
 #[derive(Debug)]
 struct FileInfo {
     path: PathBuf,
     size: u64,
+}
+
+// Function to check if a file is a GGUF file by reading its magic number
+fn is_gguf_file(path: &std::path::Path) -> io::Result<bool> {
+    let mut file = fs::File::open(path)?;
+    let mut buffer = [0u8; 4];
+
+    match file.read_exact(&mut buffer) {
+        Ok(_) => Ok(buffer == GGUF_MAGIC),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 struct App {
@@ -48,7 +62,6 @@ impl App {
         }
     }
 
-    // ... (rest of App impl remains the same)
     fn toggle_selected(&mut self) {
         if let Some(i) = self.list_state.selected() {
             self.selected[i] = !self.selected[i];
@@ -147,23 +160,20 @@ fn format_size(size: u64) -> String {
 }
 
 fn scan_directory(tx: Sender<ScanMessage>) {
-    // Create a channel for parallel workers to send their findings
     let (worker_tx, worker_rx) = mpsc::channel();
     let tx_clone = tx.clone();
 
-    // Spawn a thread to handle worker messages
     thread::spawn(move || {
         for message in worker_rx {
             tx_clone.send(message).ok();
         }
     });
 
-    // Configure the parallel walker
     let walker = WalkBuilder::new("/")
-        .hidden(false) // Include hidden files
-        .ignore(false) // Don't use .gitignore rules
-        .git_ignore(false) // Don't use .git ignore rules
-        .threads(num_cpus::get()) // Use all available CPU cores
+        .hidden(false)
+        .ignore(false)
+        .git_ignore(false)
+        .threads(num_cpus::get())
         .build_parallel();
 
     walker.run(|| {
@@ -185,15 +195,29 @@ fn scan_directory(tx: Sender<ScanMessage>) {
                 }
             }
 
-            // Check for .gguf files
-            if path.is_file() && path.extension().map_or(false, |ext| ext == "gguf") {
-                if let Ok(metadata) = fs::metadata(path) {
-                    worker_tx
-                        .send(ScanMessage::File(FileInfo {
-                            path: path.to_owned(),
-                            size: metadata.len(),
-                        }))
-                        .ok();
+            // Check if it's a file and has the GGUF magic number
+            if path.is_file() {
+                match is_gguf_file(path) {
+                    Ok(true) => {
+                        if let Ok(metadata) = fs::metadata(path) {
+                            worker_tx
+                                .send(ScanMessage::File(FileInfo {
+                                    path: path.to_owned(),
+                                    size: metadata.len(),
+                                }))
+                                .ok();
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        worker_tx
+                            .send(ScanMessage::Error(format!(
+                                "Error reading file {}: {}",
+                                path.display(),
+                                e
+                            )))
+                            .ok();
+                    }
                 }
             }
 
@@ -204,7 +228,7 @@ fn scan_directory(tx: Sender<ScanMessage>) {
     tx.send(ScanMessage::Done).ok();
 }
 
-// ... (UI code remains the same)
+// UI code and run_app function remain the same...
 fn ui(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -221,7 +245,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
             app.current_path, app.dirs_scanned, app.files_found
         )
     } else {
-        format!("Scan complete | Found {} .gguf files", app.files.len())
+        format!("Scan complete | Found {} GGUF files", app.files.len())
     };
 
     frame.render_widget(
@@ -275,7 +299,6 @@ fn run_app(rx: Receiver<ScanMessage>) -> Result<()> {
     let mut app = App::new();
 
     loop {
-        // Process any pending scan messages
         if app.scanning {
             while let Ok(message) = rx.try_recv() {
                 match message {
@@ -294,9 +317,7 @@ fn run_app(rx: Receiver<ScanMessage>) -> Result<()> {
                     ScanMessage::Done => {
                         app.scanning = false;
                     }
-                    ScanMessage::Error(_) => {
-                        // Optionally handle errors
-                    }
+                    ScanMessage::Error(_) => {}
                 }
             }
         }
@@ -333,12 +354,10 @@ fn run_app(rx: Receiver<ScanMessage>) -> Result<()> {
 fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel();
 
-    // Spawn scanning thread
     thread::spawn(move || {
         scan_directory(tx);
     });
 
-    // Run the UI with the receiver
     run_app(rx).context("Error running application")?;
 
     Ok(())
